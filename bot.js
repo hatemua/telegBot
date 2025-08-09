@@ -55,6 +55,8 @@ async function createTranscript(uploadUrl) {
       punctuate: true,
       format_text: true,
       language_detection: true,
+      // Optionally require a minimum confidence for auto language detection
+      language_confidence_threshold: 0.5,
     },
     {
       headers: {
@@ -88,6 +90,7 @@ async function transcribeWithAssemblyAI(localFilePath) {
   const uploadUrl = await uploadToAssemblyAI(localFilePath);
   const transcriptJob = await createTranscript(uploadUrl);
   const result = await waitForTranscriptCompletion(transcriptJob.id);
+  console.log('AssemblyAI transcript language:', result.language_code, '(confidence:', result.language_confidence, ')');
   console.log('AssemblyAI transcript:', result.text);
   return result.text;
 }
