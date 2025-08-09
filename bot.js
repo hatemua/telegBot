@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const { AssemblyAI } = require('assemblyai');
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -29,6 +30,7 @@ const bot = new TelegramBot(botToken, { polling: true });
 
 const assemblyApiKey = process.env.ASSEMBLY_API_KEY;
 const ASSEMBLY_BASE_URL = 'https://api.assemblyai.com/v2';
+const assemblyClient = new AssemblyAI({ apiKey: assemblyApiKey });
 
 const togetherApiKey = process.env.TOGETHER_API_KEY;
 const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
@@ -39,10 +41,7 @@ function isArabicLanguageCode(languageCode) {
   return normalized === 'ar' || normalized.startsWith('ar_');
 }
 
-function containsArabicScript(text) {
-  if (!text) return false;
-  return /[\u0600-\u06FF]/.test(text);
-}
+// Text inputs will be handled directly by the LLM; Arabic detection comes from AssemblyAI for audio.
 
 async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
   if (!togetherApiKey) {
@@ -54,6 +53,7 @@ async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
     'Follow these rules:',
     '- Always respond in English.',
     '- If the user\'s input is in Arabic, translate or summarize it into English before providing your ruling/answer.',
+    '- Keep responses brief (1–3 sentences). Do not include preambles or meta-commentary.',
     '- If relevant, briefly cite primary sources (e.g., Qur\'an 2:286, Sahih Muslim) without lengthy quotes.',
     '- Be respectful, avoid political or sectarian bias, and prefer mainstream scholarly consensus when applicable.',
   ].join('\n');
@@ -73,7 +73,7 @@ async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
       model: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
       messages,
       temperature: 0.2,
-      max_tokens: 700,
+      max_tokens: 300,
     },
     {
       headers: {
@@ -88,70 +88,22 @@ async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
   return content.trim();
 }
 
-async function uploadToAssemblyAI(localFilePath) {
-  const fileStream = fs.createReadStream(localFilePath);
-  const response = await axios({
-    method: 'post',
-    url: `${ASSEMBLY_BASE_URL}/upload`,
-    headers: {
-      Authorization: assemblyApiKey,
-      'Content-Type': 'application/octet-stream',
-    },
-    data: fileStream,
-    maxContentLength: Infinity,
-    maxBodyLength: Infinity,
-  });
-  return response.data.upload_url;
-}
-
-async function createTranscript(uploadUrl) {
-  const response = await axios.post(
-    `${ASSEMBLY_BASE_URL}/transcript`,
-    {
-      audio_url: uploadUrl,
-      // Enable useful defaults; adjust as needed
-      punctuate: true,
-      format_text: true,
-      language_detection: true,
-    },
-    {
-      headers: {
-        Authorization: assemblyApiKey,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-  return response.data; // includes id
-}
-
-async function waitForTranscriptCompletion(transcriptId, { intervalMs = 3000, timeoutMs = 5 * 60 * 1000 } = {}) {
-  const startedAt = Date.now();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const response = await axios.get(`${ASSEMBLY_BASE_URL}/transcript/${transcriptId}`, {
-      headers: { Authorization: assemblyApiKey },
-    });
-    const data = response.data;
-    if (data.status === 'completed') return data;
-    if (data.status === 'error') throw new Error(data.error || 'AssemblyAI transcription error');
-    if (Date.now() - startedAt > timeoutMs) throw new Error('AssemblyAI transcription timed out');
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-}
-
 async function transcribeWithAssemblyAI(localFilePath) {
   if (!assemblyApiKey) {
     throw new Error('Missing ASSEMBLY_API_KEY environment variable');
   }
-  const uploadUrl = await uploadToAssemblyAI(localFilePath);
-  const transcriptJob = await createTranscript(uploadUrl);
-  const result = await waitForTranscriptCompletion(transcriptJob.id);
-  console.log('AssemblyAI transcript language:', result.language_code, '(confidence:', result.language_confidence, ')');
-  console.log('AssemblyAI transcript:', result.text);
+  const transcript = await assemblyClient.transcripts.transcribe({
+    audio: fs.createReadStream(localFilePath),
+    language_detection: true,
+    punctuate: true,
+    format_text: true,
+  });
+  console.log('AssemblyAI transcript language:', transcript.language_code, '(confidence:', transcript.language_confidence, ')');
+  console.log('AssemblyAI transcript:', transcript.text);
   return {
-    text: result.text,
-    languageCode: result.language_code,
-    languageConfidence: result.language_confidence,
+    text: transcript.text,
+    languageCode: transcript.language_code,
+    languageConfidence: transcript.language_confidence,
   };
 }
 
@@ -167,8 +119,7 @@ bot.on('text', async (message) => {
   const chatId = message.chat.id;
   const incomingText = message.text || '';
   try {
-    const detectedLangCode = containsArabicScript(incomingText) ? 'ar' : undefined;
-    const llmReply = await getMuftiResponseLLM(incomingText, detectedLangCode);
+    const llmReply = await getMuftiResponseLLM(incomingText, undefined);
     await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
   } catch (error) {
     console.error('Failed to respond via LLM:', error);
@@ -196,8 +147,6 @@ bot.on('voice', async (message) => {
 
   try {
     const savedPath = await downloadFileById(voice.file_id, downloadsDirectory);
-    const relativePath = path.relative(process.cwd(), savedPath);
-    await bot.sendMessage(chatId, `Voice received (${voice.duration}s). Saved: ${relativePath}`);
     // Transcribe, then send to LLM
     try {
       const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
@@ -219,9 +168,6 @@ bot.on('audio', async (message) => {
 
   try {
     const savedPath = await downloadFileById(audio.file_id, downloadsDirectory);
-    const relativePath = path.relative(process.cwd(), savedPath);
-    const title = audio.title ? `Title: ${audio.title}\n` : '';
-    await bot.sendMessage(chatId, `Audio received. ${title}Saved: ${relativePath}`);
     // Transcribe, then send to LLM
     try {
       const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
