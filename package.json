@@ -1,0 +1,17 @@
+{
+  "name": "iftaabot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^17.2.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
