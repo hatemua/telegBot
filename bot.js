@@ -30,6 +30,64 @@ const bot = new TelegramBot(botToken, { polling: true });
 const assemblyApiKey = process.env.ASSEMBLY_API_KEY;
 const ASSEMBLY_BASE_URL = 'https://api.assemblyai.com/v2';
 
+const togetherApiKey = process.env.TOGETHER_API_KEY;
+const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
+
+function isArabicLanguageCode(languageCode) {
+  if (!languageCode) return false;
+  const normalized = String(languageCode).toLowerCase();
+  return normalized === 'ar' || normalized.startsWith('ar_');
+}
+
+function containsArabicScript(text) {
+  if (!text) return false;
+  return /[\u0600-\u06FF]/.test(text);
+}
+
+async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
+  if (!togetherApiKey) {
+    throw new Error('Missing TOGETHER_API_KEY environment variable');
+  }
+
+  const systemPrompt = [
+    'You are an Islamic expert (mufti) who provides concise, accurate answers grounded in the Qur\'an, Sunnah, and recognized fiqh methodology.',
+    'Follow these rules:',
+    '- Always respond in English.',
+    '- If the user\'s input is in Arabic, translate or summarize it into English before providing your ruling/answer.',
+    '- If relevant, briefly cite primary sources (e.g., Qur\'an 2:286, Sahih Muslim) without lengthy quotes.',
+    '- Be respectful, avoid political or sectarian bias, and prefer mainstream scholarly consensus when applicable.',
+  ].join('\n');
+
+  const userContent = isArabicLanguageCode(detectedLanguageCode)
+    ? `The following user message is in Arabic. Translate it to English first, then provide the answer in English.\n\nUser message:\n${userInput}`
+    : userInput;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userContent },
+  ];
+
+  const response = await axios.post(
+    `${TOGETHER_BASE_URL}/chat/completions`,
+    {
+      model: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+      messages,
+      temperature: 0.2,
+      max_tokens: 700,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${togetherApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 60_000,
+    }
+  );
+
+  const content = response?.data?.choices?.[0]?.message?.content || '';
+  return content.trim();
+}
+
 async function uploadToAssemblyAI(localFilePath) {
   const fileStream = fs.createReadStream(localFilePath);
   const response = await axios({
@@ -92,7 +150,11 @@ async function transcribeWithAssemblyAI(localFilePath) {
   const result = await waitForTranscriptCompletion(transcriptJob.id);
   console.log('AssemblyAI transcript language:', result.language_code, '(confidence:', result.language_confidence, ')');
   console.log('AssemblyAI transcript:', result.text);
-  return result.text;
+  return {
+    text: result.text,
+    languageCode: result.language_code,
+    languageConfidence: result.language_confidence,
+  };
 }
 
 bot.on('polling_error', (error) => {
@@ -107,9 +169,14 @@ bot.on('text', async (message) => {
   const chatId = message.chat.id;
   const incomingText = message.text || '';
   try {
-    await bot.sendMessage(chatId, `You said: ${incomingText}`);
+    const detectedLangCode = containsArabicScript(incomingText) ? 'ar' : undefined;
+    const llmReply = await getMuftiResponseLLM(incomingText, detectedLangCode);
+    await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
   } catch (error) {
-    console.error('Failed to respond to text message:', error);
+    console.error('Failed to respond via LLM:', error);
+    try {
+      await bot.sendMessage(chatId, 'Sorry, I could not process your message right now.');
+    } catch {}
   }
 });
 
@@ -132,15 +199,15 @@ bot.on('voice', async (message) => {
   try {
     const savedPath = await downloadFileById(voice.file_id, downloadsDirectory);
     const relativePath = path.relative(process.cwd(), savedPath);
-    await bot.sendMessage(
-      chatId,
-      `Received your voice message (duration: ${voice.duration}s). Saved to: ${relativePath}`
-    );
-    // Transcribe and log
+    await bot.sendMessage(chatId, `Voice received (${voice.duration}s). Saved: ${relativePath}`);
+    // Transcribe, then send to LLM
     try {
-      await transcribeWithAssemblyAI(savedPath);
+      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
+      const llmReply = await getMuftiResponseLLM(text, languageCode);
+      await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
-      console.error('Transcription failed:', err);
+      console.error('Transcription/LLM failed:', err);
+      await bot.sendMessage(chatId, 'Sorry, I could not transcribe or process your voice message.');
     }
   } catch (error) {
     await bot.sendMessage(chatId, 'Sorry, I could not download your voice message.');
@@ -156,15 +223,15 @@ bot.on('audio', async (message) => {
     const savedPath = await downloadFileById(audio.file_id, downloadsDirectory);
     const relativePath = path.relative(process.cwd(), savedPath);
     const title = audio.title ? `Title: ${audio.title}\n` : '';
-    await bot.sendMessage(
-      chatId,
-      `Received your audio file. ${title}Saved to: ${relativePath}`
-    );
-    // Transcribe and log
+    await bot.sendMessage(chatId, `Audio received. ${title}Saved: ${relativePath}`);
+    // Transcribe, then send to LLM
     try {
-      await transcribeWithAssemblyAI(savedPath);
+      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
+      const llmReply = await getMuftiResponseLLM(text, languageCode);
+      await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
-      console.error('Transcription failed:', err);
+      console.error('Transcription/LLM failed:', err);
+      await bot.sendMessage(chatId, 'Sorry, I could not transcribe or process your audio file.');
     }
   } catch (error) {
     await bot.sendMessage(chatId, 'Sorry, I could not download your audio file.');
