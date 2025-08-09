@@ -41,26 +41,40 @@ function isArabicLanguageCode(languageCode) {
   return normalized === 'ar' || normalized.startsWith('ar_');
 }
 
-// Text inputs will be handled directly by the LLM; Arabic detection comes from AssemblyAI for audio.
+// Track per-chat response language preference (default: English)
+const chatLanguagePreference = new Map(); // chatId -> 'en' | 'ar'
 
-async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
+function getPreferredLanguageForChat(chatId) {
+  return chatLanguagePreference.get(chatId) || 'en';
+}
+
+function setPreferredLanguageForChat(chatId, langCode) {
+  const normalized = (langCode || '').toLowerCase();
+  if (normalized !== 'en' && normalized !== 'ar') return false;
+  chatLanguagePreference.set(chatId, normalized);
+  return true;
+}
+
+// Text inputs will be handled directly by the LLM; audio language detection comes from AssemblyAI.
+
+async function getMuftiResponseLLM(userInput, targetLanguage, detectedLanguageCode) {
   if (!togetherApiKey) {
     throw new Error('Missing TOGETHER_API_KEY environment variable');
   }
 
+  const respondInArabic = targetLanguage === 'ar';
   const systemPrompt = [
-    'You are an Islamic expert (mufti) who provides concise, accurate answers grounded in the Qur\'an, Sunnah, and recognized fiqh methodology.',
+    'You are an Islamic expert (mufti) who provides accurate, well-sourced answers grounded in the Qur\'an, Sunnah, and recognized fiqh methodology.',
     'Follow these rules:',
-    '- Always respond in English.',
-    '- If the user\'s input is in Arabic, translate or summarize it into English before providing your ruling/answer.',
-    '- Keep responses brief (1–3 sentences). Do not include preambles or meta-commentary.',
-    '- If relevant, briefly cite primary sources (e.g., Qur\'an 2:286, Sahih Muslim) without lengthy quotes.',
+    respondInArabic
+      ? '- Always respond in Arabic. If the user\'s message is not in Arabic, briefly translate/summarize it into Arabic first, then provide the answer in Arabic.'
+      : '- Always respond in English. If the user\'s message is not in English, briefly translate/summarize it into English first, then provide the answer in English.',
+    '- Provide a clear, detailed response with reasoning, relevant evidence, and practical guidance where applicable.',
+    '- Briefly cite primary sources when relevant (e.g., Qur\'an 2:286; Sahih Muslim), without overly long quotations.',
     '- Be respectful, avoid political or sectarian bias, and prefer mainstream scholarly consensus when applicable.',
   ].join('\n');
 
-  const userContent = isArabicLanguageCode(detectedLanguageCode)
-    ? `The following user message is in Arabic. Translate it to English first, then provide the answer in English.\n\nUser message:\n${userInput}`
-    : userInput;
+  const userContent = userInput;
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -73,7 +87,7 @@ async function getMuftiResponseLLM(userInput, detectedLanguageCode) {
       model: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
       messages,
       temperature: 0.2,
-      max_tokens: 300,
+      max_tokens: 900,
     },
     {
       headers: {
@@ -119,7 +133,45 @@ bot.on('text', async (message) => {
   const chatId = message.chat.id;
   const incomingText = message.text || '';
   try {
-    const llmReply = await getMuftiResponseLLM(incomingText, undefined);
+    // Commands: /start, /lang, /lang en, /lang ar
+    if (/^\/start\b/i.test(incomingText)) {
+      const current = getPreferredLanguageForChat(chatId);
+      const text = current === 'ar'
+        ? 'مرحبًا! أرسل سؤالك، وسأجيبك بإجابات مفصلة. اختر لغة الرد:'
+        : 'Welcome! Send your question and I will provide a detailed answer. Choose your response language:';
+      await bot.sendMessage(chatId, text, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: 'English', callback_data: 'set_lang:en' },
+            { text: 'العربية', callback_data: 'set_lang:ar' },
+          ]],
+        },
+      });
+      return;
+    }
+
+    const langMatch = incomingText.match(/^\/lang(?:\s+(en|ar))?\b/i);
+    if (langMatch) {
+      const code = langMatch[1]?.toLowerCase();
+      if (code === 'en' || code === 'ar') {
+        setPreferredLanguageForChat(chatId, code);
+        const msg = code === 'ar' ? 'تم تعيين لغة الرد إلى العربية.' : 'Response language set to English.';
+        await bot.sendMessage(chatId, msg);
+      } else {
+        await bot.sendMessage(chatId, 'Choose response language:', {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: 'English', callback_data: 'set_lang:en' },
+              { text: 'العربية', callback_data: 'set_lang:ar' },
+            ]],
+          },
+        });
+      }
+      return;
+    }
+
+    const targetLang = getPreferredLanguageForChat(chatId);
+    const llmReply = await getMuftiResponseLLM(incomingText, targetLang, undefined);
     await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
   } catch (error) {
     console.error('Failed to respond via LLM:', error);
@@ -150,7 +202,8 @@ bot.on('voice', async (message) => {
     // Transcribe, then send to LLM
     try {
       const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
-      const llmReply = await getMuftiResponseLLM(text, languageCode);
+      const targetLang = getPreferredLanguageForChat(chatId);
+      const llmReply = await getMuftiResponseLLM(text, targetLang, languageCode);
       await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
       console.error('Transcription/LLM failed:', err);
@@ -171,7 +224,8 @@ bot.on('audio', async (message) => {
     // Transcribe, then send to LLM
     try {
       const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
-      const llmReply = await getMuftiResponseLLM(text, languageCode);
+      const targetLang = getPreferredLanguageForChat(chatId);
+      const llmReply = await getMuftiResponseLLM(text, targetLang, languageCode);
       await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
       console.error('Transcription/LLM failed:', err);
@@ -179,6 +233,27 @@ bot.on('audio', async (message) => {
     }
   } catch (error) {
     await bot.sendMessage(chatId, 'Sorry, I could not download your audio file.');
+  }
+});
+
+// Handle inline language selection
+bot.on('callback_query', async (query) => {
+  try {
+    const chatId = query.message?.chat?.id;
+    const data = query.data || '';
+    if (!chatId || !data) return;
+    if (data.startsWith('set_lang:')) {
+      const code = data.split(':')[1];
+      if (code === 'en' || code === 'ar') {
+        setPreferredLanguageForChat(chatId, code);
+        const msg = code === 'ar' ? 'تم تعيين لغة الرد إلى العربية.' : 'Response language set to English.';
+        await bot.answerCallbackQuery(query.id);
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message.message_id }).catch(() => {});
+        await bot.sendMessage(chatId, msg);
+      }
+    }
+  } catch (e) {
+    console.error('callback_query error:', e);
   }
 });
 
