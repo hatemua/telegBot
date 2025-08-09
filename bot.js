@@ -113,8 +113,6 @@ async function createTranscript(uploadUrl) {
       punctuate: true,
       format_text: true,
       language_detection: true,
-      // Optionally require a minimum confidence for auto language detection
-      language_confidence_threshold: 0.5,
     },
     {
       headers: {
