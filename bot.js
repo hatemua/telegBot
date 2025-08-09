@@ -102,16 +102,23 @@ async function getMuftiResponseLLM(userInput, targetLanguage, detectedLanguageCo
   return content.trim();
 }
 
-async function transcribeWithAssemblyAI(localFilePath) {
+async function transcribeWithAssemblyAI(localFilePath, targetLanguage) {
   if (!assemblyApiKey) {
     throw new Error('Missing ASSEMBLY_API_KEY environment variable');
   }
-  const transcript = await assemblyClient.transcripts.transcribe({
+  const params = {
     audio: fs.createReadStream(localFilePath),
-    language_detection: true,
     punctuate: true,
     format_text: true,
-  });
+  };
+  if (targetLanguage === 'ar') {
+    params.language_code = 'ar';
+  } else if (targetLanguage === 'en') {
+    params.language_code = 'en_us';
+  } else {
+    params.language_detection = true;
+  }
+  const transcript = await assemblyClient.transcripts.transcribe(params);
   console.log('AssemblyAI transcript language:', transcript.language_code, '(confidence:', transcript.language_confidence, ')');
   console.log('AssemblyAI transcript:', transcript.text);
   return {
@@ -201,8 +208,8 @@ bot.on('voice', async (message) => {
     const savedPath = await downloadFileById(voice.file_id, downloadsDirectory);
     // Transcribe, then send to LLM
     try {
-      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
       const targetLang = getPreferredLanguageForChat(chatId);
+      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath, targetLang);
       const llmReply = await getMuftiResponseLLM(text, targetLang, languageCode);
       await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
@@ -223,8 +230,8 @@ bot.on('audio', async (message) => {
     const savedPath = await downloadFileById(audio.file_id, downloadsDirectory);
     // Transcribe, then send to LLM
     try {
-      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath);
       const targetLang = getPreferredLanguageForChat(chatId);
+      const { text, languageCode } = await transcribeWithAssemblyAI(savedPath, targetLang);
       const llmReply = await getMuftiResponseLLM(text, targetLang, languageCode);
       await bot.sendMessage(chatId, llmReply, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(chatId, llmReply));
     } catch (err) {
