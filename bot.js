@@ -17,6 +17,7 @@ if (!botToken) {
 }
 
 const downloadsDirectory = path.resolve(__dirname, 'downloads');
+const preferencesFilePath = path.resolve(__dirname, 'preferences.json');
 
 function ensureDirectoryExists(directoryPath) {
   if (!fs.existsSync(directoryPath)) {
@@ -43,15 +44,44 @@ function isArabicLanguageCode(languageCode) {
 
 // Track per-chat response language preference (default: English)
 const chatLanguagePreference = new Map(); // chatId -> 'en' | 'ar'
+let persistedPreferences = {};
+
+function loadPreferencesFromDisk() {
+  try {
+    if (fs.existsSync(preferencesFilePath)) {
+      const raw = fs.readFileSync(preferencesFilePath, 'utf8');
+      persistedPreferences = JSON.parse(raw || '{}');
+      Object.entries(persistedPreferences).forEach(([chatId, lang]) => {
+        if (lang === 'en' || lang === 'ar') chatLanguagePreference.set(String(chatId), lang);
+      });
+    }
+  } catch (e) {
+    console.error('Failed to load preferences.json:', e);
+    persistedPreferences = {};
+  }
+}
+
+function savePreferencesToDisk() {
+  try {
+    fs.writeFileSync(preferencesFilePath, JSON.stringify(persistedPreferences, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save preferences.json:', e);
+  }
+}
+
+loadPreferencesFromDisk();
 
 function getPreferredLanguageForChat(chatId) {
-  return chatLanguagePreference.get(chatId) || 'en';
+  return chatLanguagePreference.get(String(chatId)) || 'en';
 }
 
 function setPreferredLanguageForChat(chatId, langCode) {
   const normalized = (langCode || '').toLowerCase();
   if (normalized !== 'en' && normalized !== 'ar') return false;
-  chatLanguagePreference.set(chatId, normalized);
+  const key = String(chatId);
+  chatLanguagePreference.set(key, normalized);
+  persistedPreferences[key] = normalized;
+  savePreferencesToDisk();
   return true;
 }
 
